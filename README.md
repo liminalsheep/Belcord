@@ -1,8 +1,3 @@
-> # ⚠️ WARNING
-> ## This project is under development and does not work yet.
-
 Hi, I made this project to make Discord bot developing just like applying mods to a videogame.
 
-I was kind of lazy while making all of this, so some parts of code don't have that much documentation. If possible, please submit a pull request to add more documentation :D
-
-# Belcord
+You can submit your plugins at my Discord server: **[BUSSIN'](<https://discord.gg/3pT2S7czUR>)**
