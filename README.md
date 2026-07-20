@@ -1,5 +1,5 @@
 # Belcord
-
+Discord bot development just as applying mods to a videogame.
 You can submit your plugins at my Discord server: **[BUSSIN'](<https://discord.gg/3pT2S7czUR>)**
 
 ## 🛠️ Plugin Management
