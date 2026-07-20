@@ -1,5 +1,5 @@
 """Plugin manager CLI."""
-__version__ = "1"
+__version__ = "1.2"
 
 import aiohttp
 import asyncio
@@ -22,56 +22,99 @@ HEADERS = {
 }
 
 PAGE_SIZE = 10
-CACHE_EXPIRATION_SECONDS = 60*60*24*7  # 1 week in seconds
+CACHE_EXPIRATION_SECONDS = 60 * 60 * 24
 
 
-# --- Cache Helper ---
+# --- Cache Helpers ---
 
-async def get_cached_tags(session: aiohttp.ClientSession) -> dict:
-    """Fetches tags.json from repo/tags.json, caching it in __pycache__ for a week."""
+def get_cache_dir() -> str:
+    """Ensures and returns the path to the __pycache__ directory."""
     cache_dir = os.path.join(os.path.dirname(__file__), "__pycache__")
     os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, "tags.json")
+    return cache_dir
 
-    # Check if cache exists and is fresh
+
+async def fetch_json_cached(session: aiohttp.ClientSession, filename: str, url: str, fallback_data: dict | list, headers: dict | None = None) -> dict | list:
+    """Generic JSON caching wrapper for GET requests."""
+    cache_file = os.path.join(get_cache_dir(), filename)
+
     if os.path.exists(cache_file):
-        file_age = time.time() - os.path.getmtime(cache_file)
-        if file_age < CACHE_EXPIRATION_SECONDS:
+        if time.time() - os.path.getmtime(cache_file) < CACHE_EXPIRATION_SECONDS:
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     return json.load(f)
             except (json.JSONDecodeError, OSError):
-                pass  # Fall back to refetching if cache is corrupt
+                pass  # Fall back to fetching if cache is corrupt
 
-    # Refetch tags
-    url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/tags.json"
     try:
-        async with session.get(url) as response:
+        async with session.get(url, headers=headers) as response:
             if response.status == 200:
-                tags_data = await response.json(content_type=None)
+                data = await response.json(content_type=None)
                 with open(cache_file, "w", encoding="utf-8") as f:
-                    json.dump(tags_data, f, indent=2)
-                return tags_data
-            else:
-                print(f"Error fetching tags: {response.status}")
+                    json.dump(data, f, indent=2)
+                return data
+            print(f"Error fetching {filename}: HTTP {response.status}")
     except Exception as e:
-        print(f"Failed to fetch tags: {e}")
+        print(f"Failed to fetch {filename}: {e}")
 
-    return {"all": [], "plugins": {}}
+    # Fallback attempt on failure: try reading expired/corrupted cache before using fallback_data
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return fallback_data
+
+
+async def get_cached_tags(session: aiohttp.ClientSession) -> dict:
+    url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/tags.json"
+    return await fetch_json_cached(session, "tags.json", url, fallback_data={"all": [], "plugins": {}})
 
 
 # --- Local Plugin Helpers ---
 
+def get_plugin_path(plugin_name: str) -> str | None:
+    """Locates local plugin directory containing a manifest.json."""
+    candidates = [
+        os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, plugin_name),
+        os.path.join(LOCAL_PLUGINS_DIR, plugin_name)
+    ]
+    for path in candidates:
+        if os.path.exists(os.path.join(path, "manifest.json")):
+            return path
+    return None
+
+
+def get_installed_plugins() -> list[str]:
+    """Returns a list of folder names for locally installed plugins."""
+    search_dirs = [
+        os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH),
+        LOCAL_PLUGINS_DIR
+    ]
+    installed = set()
+    for base_dir in search_dirs:
+        if os.path.exists(base_dir):
+            for entry in os.listdir(base_dir):
+                if os.path.exists(os.path.join(base_dir, entry, "manifest.json")):
+                    installed.add(entry)
+    return list(installed)
+
+
 def get_installed_manifest(plugin_name: str) -> dict | None:
     """Returns local manifest dict if the plugin is installed locally."""
-    manifest_path = os.path.join(LOCAL_PLUGINS_DIR, plugin_name, "manifest.json")
-    if os.path.exists(manifest_path):
-        try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return None
-    return None
+    path = get_plugin_path(plugin_name)
+    if not path:
+        return None
+    try:
+        with open(os.path.join(path, "manifest.json"), "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+            if plugin_name.lower() == "belcord":
+                manifest["enabled"] = True
+            return manifest
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def get_plugin_status(plugin_name: str) -> str | None:
@@ -84,11 +127,16 @@ def get_plugin_status(plugin_name: str) -> str | None:
 
 def update_manifest_enabled(plugin_name: str, enabled: bool) -> bool:
     """Updates the 'enabled' key in local manifest.json."""
-    manifest_path = os.path.join(LOCAL_PLUGINS_DIR, plugin_name, "manifest.json")
-    if not os.path.exists(manifest_path):
+    if plugin_name.lower() == "belcord":
+        print("Plugin 'belcord' is always enabled and cannot be toggled.")
+        return False
+
+    path = get_plugin_path(plugin_name)
+    if not path:
         print(f"Plugin '{plugin_name}' is not installed.")
         return False
 
+    manifest_path = os.path.join(path, "manifest.json")
     try:
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
@@ -104,37 +152,41 @@ def update_manifest_enabled(plugin_name: str, enabled: bool) -> bool:
         return False
 
 
-# --- Github API ---
+# --- GitHub API ---
 
-async def get_plugins(session: aiohttp.ClientSession) -> list:
-    """Fetches directory names using the public API endpoint."""
+async def get_plugins(session: aiohttp.ClientSession) -> list[str]:
+    """Fetches plugin list from GitHub, caching in __pycache__/plugins.json."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{PLUGINS_PATH}"
+    result = await fetch_json_cached(session, "plugins.json", url, fallback_data=None, headers=HEADERS)
 
-    async with session.get(url, headers=HEADERS) as response:
-        if response.status != 200:
-            print(f"Error fetching directory structure: {response.status}")
-            return []
-        contents = await response.json()
-        return [item["name"] for item in contents if item["type"] == "dir"]
+    if isinstance(result, list):
+        # GitHub contents endpoint returns a list of items
+        if result and isinstance(result[0], dict) and "name" in result[0]:
+            return [item["name"] for item in result if item.get("type") == "dir"]
+        # If loaded from cache, it's already a simple list of strings
+        return result
+
+    return get_installed_plugins()
 
 
 async def load_manifest(session: aiohttp.ClientSession, plugin_folder: str) -> dict:
     """Loads manifest.json directly from GitHub's raw content delivery network."""
     url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{PLUGINS_PATH}/{plugin_folder}/manifest.json"
+    try:
+        async with session.get(url) as response:
+            if response.status != 200:
+                print(f"Could not find or load manifest for {plugin_folder}")
+                return {}
+            manifest = await response.json(content_type=None)
+            if plugin_folder.lower() == "belcord":
+                manifest["enabled"] = True
+            return manifest
+    except (aiohttp.ClientError, json.JSONDecodeError):
+        print(f"Invalid JSON or connection error in manifest for {plugin_folder}")
+        return {}
 
-    async with session.get(url) as response:
-        if response.status != 200:
-            print(f"Could not find or load manifest for {plugin_folder}")
-            return {}
 
-        try:
-            return await response.json(content_type=None)
-        except json.JSONDecodeError:
-            print(f"Invalid JSON in manifest for {plugin_folder}")
-            return {}
-
-
-async def download_file(session, download_url, local_path):
+async def download_file(session: aiohttp.ClientSession, download_url: str, local_path: str):
     """Downloads an individual file from a raw URL."""
     try:
         async with session.get(download_url, headers=HEADERS) as response:
@@ -160,7 +212,7 @@ async def download_file(session, download_url, local_path):
         print(f"Error downloading {local_path}: {e}")
 
 
-async def download_folder(session, folder_path, local_dir):
+async def download_folder(session: aiohttp.ClientSession, folder_path: str, local_dir: str):
     """Recursively fetches directory contents and downloads files/folders."""
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{folder_path}"
 
@@ -174,16 +226,11 @@ async def download_folder(session, folder_path, local_dir):
 
         for item in items:
             if item["type"] == "file":
-                download_url = item["download_url"]
                 local_path = os.path.join(local_dir, item["name"])
-                task = download_file(session, download_url, local_path)
-                download_tasks.append(task)
-
+                download_tasks.append(download_file(session, item["download_url"], local_path))
             elif item["type"] == "dir":
-                subfolder_remote_path = item["path"] 
                 subfolder_local_path = os.path.join(local_dir, item["name"])
-                task = download_folder(session, subfolder_remote_path, subfolder_local_path)
-                download_tasks.append(task)
+                download_tasks.append(download_folder(session, item["path"], subfolder_local_path))
 
         if download_tasks:
             await asyncio.gather(*download_tasks)
@@ -194,16 +241,18 @@ async def download_folder(session, folder_path, local_dir):
 def format_plugin_display(plugin_name: str) -> str:
     """Formats a plugin name, appending status in parentheses if installed."""
     status = get_plugin_status(plugin_name)
-    if status:
-        return f"{plugin_name} ({status})"
-    return plugin_name
+    return f"{plugin_name} ({status})" if status else plugin_name
 
 
 def sort_plugins_installed_first(plugin_names: list[str]) -> list[str]:
-    """Sorts plugins so installed ones are listed at the top."""
-    installed = [p for p in plugin_names if get_plugin_status(p) is not None]
-    uninstalled = [p for p in plugin_names if get_plugin_status(p) is None]
-    return installed + uninstalled
+    """Sorts plugins so 'belcord' is at the very top, then installed, then uninstalled."""
+    belcord_plugins = [p for p in plugin_names if p.lower() == "belcord"]
+    other_plugins = [p for p in plugin_names if p.lower() != "belcord"]
+
+    installed = [p for p in other_plugins if get_plugin_status(p) is not None]
+    uninstalled = [p for p in other_plugins if get_plugin_status(p) is None]
+
+    return belcord_plugins + installed + uninstalled
 
 
 def paginate_and_print(plugin_list: list[str], page_num: int, header_title: str, total_label: str = "matched"):
@@ -214,14 +263,34 @@ def paginate_and_print(plugin_list: list[str], page_num: int, header_title: str,
 
     page_num = max(1, min(page_num, total_pages))
     start_idx = (page_num - 1) * PAGE_SIZE
-    end_idx = start_idx + PAGE_SIZE
-    page_items = sorted_plugins[start_idx:end_idx]
+    page_items = sorted_plugins[start_idx:start_idx + PAGE_SIZE]
 
     print(f"\n{header_title}")
     for plugin in page_items:
         print(f"* {format_plugin_display(plugin)}")
 
     print(f"\nPage {page_num} of {total_pages} • {total_plugins} {total_label}\n")
+
+
+async def fetch_upgradable_plugins(session: aiohttp.ClientSession) -> list[tuple[str, str, str]]:
+    """Checks all locally installed plugins against their remote manifests."""
+    installed = get_installed_plugins()
+    upgradable = []
+
+    for name in installed:
+        local_manifest = get_installed_manifest(name) or {}
+        remote_manifest = await load_manifest(session, name)
+
+        if not remote_manifest:
+            continue
+
+        current_version = str(local_manifest.get("version") or local_manifest.get("plugin_version") or "0")
+        remote_version = str(remote_manifest.get("version") or remote_manifest.get("plugin_version") or "0")
+
+        if current_version != remote_version:
+            upgradable.append((name, current_version, remote_version))
+
+    return upgradable
 
 
 # --- CLI Commands ---
@@ -254,19 +323,15 @@ async def cmd_search(session: aiohttp.ClientSession, args: list[str]):
         print("Usage: search <tag1> [tag2] ... [page_number]")
         return
 
-    page = 1
-    if args[-1].isdigit():
-        page = int(args.pop())
-
+    page = int(args.pop()) if args[-1].isdigit() else 1
     search_tags = [t.lower() for t in args]
     tags_data = await get_cached_tags(session)
     plugin_tags_map = tags_data.get("plugins", {})
 
-    matching_plugins = []
-    for plugin_name, tags in plugin_tags_map.items():
-        plugin_tags_lower = [t.lower() for t in tags]
-        if all(tag in plugin_tags_lower for tag in search_tags):
-            matching_plugins.append(plugin_name)
+    matching_plugins = [
+        plugin_name for plugin_name, tags in plugin_tags_map.items()
+        if all(tag in [t.lower() for t in tags] for tag in search_tags)
+    ]
 
     if not matching_plugins:
         print("No matching plugins found.")
@@ -282,30 +347,27 @@ async def cmd_install(session: aiohttp.ClientSession, args: list[str]):
 
     plugin_name = args[0]
     remote_folder = f"{PLUGINS_PATH}/{plugin_name}"
-    local_dir = os.path.join(LOCAL_PLUGINS_DIR, plugin_name)
+    local_dir = os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, plugin_name)
 
     print(f"Installing '{plugin_name}'...")
     await download_folder(session, remote_folder, local_dir)
 
 
-async def cmd_enable(session: aiohttp.ClientSession, args: list[str]):
+def _toggle_plugins(args: list[str], enable_state: bool, state_label: str):
     if not args:
-        print("Usage: enable <plugin_name1> [plugin_name2] ...")
+        print(f"Usage: {state_label.lower()} <plugin_name1> [plugin_name2] ...")
         return
-
     for name in args:
-        if update_manifest_enabled(name, True):
-            print(f"Enabled plugin: {name}")
+        if update_manifest_enabled(name, enable_state):
+            print(f"{state_label} plugin: {name}")
+
+
+async def cmd_enable(session: aiohttp.ClientSession, args: list[str]):
+    _toggle_plugins(args, True, "Enabled")
 
 
 async def cmd_disable(session: aiohttp.ClientSession, args: list[str]):
-    if not args:
-        print("Usage: disable <plugin_name1> [plugin_name2] ...")
-        return
-
-    for name in args:
-        if update_manifest_enabled(name, False):
-            print(f"Disabled plugin: {name}")
+    _toggle_plugins(args, False, "Disabled")
 
 
 async def cmd_uninstall(session: aiohttp.ClientSession, args: list[str]):
@@ -314,15 +376,56 @@ async def cmd_uninstall(session: aiohttp.ClientSession, args: list[str]):
         return
 
     for name in args:
-        local_dir = os.path.join(LOCAL_PLUGINS_DIR, name)
-        if os.path.exists(local_dir):
+        path = get_plugin_path(name)
+        if path and os.path.exists(path):
             try:
-                shutil.rmtree(local_dir)
+                shutil.rmtree(path)
                 print(f"Uninstalled plugin: {name}")
             except Exception as e:
                 print(f"Failed to uninstall plugin '{name}': {e}")
         else:
             print(f"Plugin '{name}' is not installed.")
+
+
+async def cmd_upgradable(session: aiohttp.ClientSession, args: list[str]):
+    print("Checking for updates...")
+    upgradable_list = await fetch_upgradable_plugins(session)
+
+    if not upgradable_list:
+        print("All plugins are up to date.")
+        return
+
+    print("\n🚀 Upgradable Plugins:")
+    for name, curr, remote in upgradable_list:
+        print(f"* {name} (current: {curr} -> latest: {remote})")
+    print()
+
+
+async def cmd_upgrade(session: aiohttp.ClientSession, args: list[str]):
+    if not args:
+        print("Usage: upgrade <plugin_name1> [plugin_name2] ... or 'upgrade all'")
+        return
+
+    plugins_to_upgrade = list(args)
+
+    if len(plugins_to_upgrade) == 1 and plugins_to_upgrade[0].lower() == "all":
+        print("Checking for upgradable plugins...")
+        upgradable_info = await fetch_upgradable_plugins(session)
+        if not upgradable_info:
+            print("No plugins require upgrading.")
+            return
+        plugins_to_upgrade = [item[0] for item in upgradable_info]
+
+    for name in plugins_to_upgrade:
+        if not get_plugin_status(name):
+            print(f"Plugin '{name}' is not currently installed. Use 'install {name}' instead.")
+            continue
+
+        print(f"Upgrading '{name}'...")
+        remote_folder = f"{PLUGINS_PATH}/{name}"
+        local_dir = get_plugin_path(name) or os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, name)
+        await download_folder(session, remote_folder, local_dir)
+        print(f"Successfully upgraded '{name}'.")
 
 
 # --- Main Loop ---
@@ -335,6 +438,8 @@ COMMANDS = {
     "enable": cmd_enable,
     "disable": cmd_disable,
     "uninstall": cmd_uninstall,
+    "upgradable": cmd_upgradable,
+    "upgrade": cmd_upgrade,
 }
 
 
