@@ -1,5 +1,5 @@
 """Plugin manager CLI."""
-__version__ = "1.2"
+__version__ = "1.2.1"
 
 import aiohttp
 import asyncio
@@ -11,7 +11,7 @@ import shutil
 import time
 
 REPO_OWNER = "liminalsheep"
-REPO_NAME = "Belcord-plugins"
+REPO_NAME = "Belcord"
 PLUGINS_PATH = "plugins"
 LOCAL_PLUGINS_DIR = os.path.dirname(os.path.dirname(__file__))
 
@@ -160,10 +160,8 @@ async def get_plugins(session: aiohttp.ClientSession) -> list[str]:
     result = await fetch_json_cached(session, "plugins.json", url, fallback_data=None, headers=HEADERS)
 
     if isinstance(result, list):
-        # GitHub contents endpoint returns a list of items
         if result and isinstance(result[0], dict) and "name" in result[0]:
             return [item["name"] for item in result if item.get("type") == "dir"]
-        # If loaded from cache, it's already a simple list of strings
         return result
 
     return get_installed_plugins()
@@ -194,7 +192,6 @@ async def download_file(session: aiohttp.ClientSession, download_url: str, local
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
                 content = await response.read()
 
-                # Inject enabled = true if downloading manifest.json
                 if os.path.basename(local_path) == "manifest.json":
                     try:
                         manifest = json.loads(content.decode("utf-8"))
@@ -234,6 +231,38 @@ async def download_folder(session: aiohttp.ClientSession, folder_path: str, loca
 
         if download_tasks:
             await asyncio.gather(*download_tasks)
+
+
+async def install_plugin_with_dependencies(session: aiohttp.ClientSession, plugin_name: str, visited: set | None = None) -> bool:
+    """Helper function to recursively check manifest dependencies and install a plugin."""
+    if visited is None:
+        visited = set()
+
+    if plugin_name in visited:
+        return True  # Avoid circular loops
+    visited.add(plugin_name)
+
+    manifest = await load_manifest(session, plugin_name)
+    if not manifest:
+        print(f"Cannot install '{plugin_name}': manifest not found or invalid.")
+        return False
+
+    dependencies = manifest.get("dependencies", [])
+    if isinstance(dependencies, list):
+        for dep_name in dependencies:
+            if not get_plugin_status(dep_name):
+                print(f"Found dependency '{dep_name}' for '{plugin_name}'. Installing dependency first...")
+                success = await install_plugin_with_dependencies(session, dep_name, visited)
+                if not success:
+                    print(f"Failed to install dependency '{dep_name}'. Aborting installation of '{plugin_name}'.")
+                    return False
+
+    remote_folder = f"{PLUGINS_PATH}/{plugin_name}"
+    local_dir = os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, plugin_name)
+
+    print(f"Installing '{plugin_name}'...")
+    await download_folder(session, remote_folder, local_dir)
+    return True
 
 
 # --- Formatting & Output Helpers ---
@@ -346,11 +375,7 @@ async def cmd_install(session: aiohttp.ClientSession, args: list[str]):
         return
 
     plugin_name = args[0]
-    remote_folder = f"{PLUGINS_PATH}/{plugin_name}"
-    local_dir = os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, plugin_name)
-
-    print(f"Installing '{plugin_name}'...")
-    await download_folder(session, remote_folder, local_dir)
+    await install_plugin_with_dependencies(session, plugin_name)
 
 
 def _toggle_plugins(args: list[str], enable_state: bool, state_label: str):
