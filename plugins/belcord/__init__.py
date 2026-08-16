@@ -7,7 +7,7 @@ Added events:
     on_closing():
         Called when `await client.close()` is executed.
 """
-__version__ = "0.1"
+__version__ = "0.2"
 __all__ = ["trigger_event", "create_event", "remove_event"]
 
 
