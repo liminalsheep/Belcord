@@ -63,7 +63,6 @@ def init(client: "discord.Client"):
         i[0] for i in
         sorted(scripts.items(), key=lambda x: x[1])
     ] + last
-    print(scripts)
 
     # Load selected scripts
     for s in scripts:
