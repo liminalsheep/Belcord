@@ -44,7 +44,6 @@ def init(client: "discord.Client"):
     }
 
     scripts.pop("belcord", None)
-    last = []
 
     # Check enabled plugins and load layer
     for s in scripts.copy():
@@ -54,7 +53,7 @@ def init(client: "discord.Client"):
         ) as f:
             manifest = json.load(f)
             if manifest.get("enabled", True):
-                scripts[s] = manifest.get("load_layer", -1)
+                scripts[s] = manifest.get("load_layer", float("-inf"))
             else:
                 del scripts[s]
 
@@ -62,7 +61,7 @@ def init(client: "discord.Client"):
     scripts = [
         i[0] for i in
         sorted(scripts.items(), key=lambda x: x[1])
-    ] + last
+    ]
 
     # Load selected scripts
     for s in scripts:
