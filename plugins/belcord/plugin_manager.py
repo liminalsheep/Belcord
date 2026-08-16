@@ -1,5 +1,5 @@
 """Plugin manager CLI."""
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 import aiohttp
 import asyncio
@@ -89,17 +89,11 @@ def get_plugin_path(plugin_name: str) -> str | None:
 
 def get_installed_plugins() -> list[str]:
     """Returns a list of folder names for locally installed plugins."""
-    search_dirs = [
-        os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH),
-        LOCAL_PLUGINS_DIR
-    ]
     installed = set()
-    for base_dir in search_dirs:
-        if os.path.exists(base_dir):
-            for entry in os.listdir(base_dir):
-                if os.path.exists(os.path.join(base_dir, entry, "manifest.json")):
-                    installed.add(entry)
-    return list(installed)
+    for entry in os.listdir(LOCAL_PLUGINS_DIR):
+        if os.path.exists(os.path.join(LOCAL_PLUGINS_DIR, entry, "manifest.json")):
+            installed.add(entry)
+    return sorted(installed)
 
 
 def get_installed_manifest(plugin_name: str) -> dict | None:
@@ -164,7 +158,7 @@ async def get_plugins(session: aiohttp.ClientSession) -> list[str]:
             return [item["name"] for item in result if item.get("type") == "dir"]
         return result
 
-    return get_installed_plugins()
+    return []
 
 
 async def load_manifest(session: aiohttp.ClientSession, plugin_folder: str) -> dict:
@@ -273,26 +267,25 @@ def format_plugin_display(plugin_name: str) -> str:
     return f"{plugin_name} ({status})" if status else plugin_name
 
 
-def sort_plugins_installed_first(plugin_names: list[str]) -> list[str]:
-    """Sorts plugins so 'belcord' is at the very top, then installed, then uninstalled."""
-    belcord_plugins = [p for p in plugin_names if p.lower() == "belcord"]
-    other_plugins = [p for p in plugin_names if p.lower() != "belcord"]
-
-    installed = [p for p in other_plugins if get_plugin_status(p) is not None]
-    uninstalled = [p for p in other_plugins if get_plugin_status(p) is None]
-
-    return belcord_plugins + installed + uninstalled
+def sort_plugins(plugin_names: list[str]) -> list[str]:
+    """Sorts plugins so 'belcord' is at the very top"""
+    try:
+        while True:
+            plugin_names.remove("belcord")
+    except ValueError:
+        pass
+    plugin_names.insert(0, "belcord")
 
 
 def paginate_and_print(plugin_list: list[str], page_num: int, header_title: str, total_label: str = "matched"):
     """Handles sorting, pagination, and printing for plugin lists."""
-    sorted_plugins = sort_plugins_installed_first(plugin_list)
-    total_plugins = len(sorted_plugins)
+    sort_plugins(plugin_list)
+    total_plugins = len(plugin_list)
     total_pages = max(1, math.ceil(total_plugins / PAGE_SIZE))
 
     page_num = max(1, min(page_num, total_pages))
     start_idx = (page_num - 1) * PAGE_SIZE
-    page_items = sorted_plugins[start_idx:start_idx + PAGE_SIZE]
+    page_items = plugin_list[start_idx:start_idx + PAGE_SIZE]
 
     print(f"\n{header_title}")
     for plugin in page_items:
@@ -326,7 +319,9 @@ async def fetch_upgradable_plugins(session: aiohttp.ClientSession) -> list[tuple
 
 async def cmd_list(session: aiohttp.ClientSession, args: list[str]):
     page = int(args[0]) if args and args[0].isdigit() else 1
-    plugins = await get_plugins(session)
+    plugins = list(dict.fromkeys(
+        get_installed_plugins() + (await get_plugins(session))
+    ))
     if not plugins:
         print("No plugins available.")
         return
