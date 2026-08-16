@@ -4,7 +4,7 @@ Usage:
     import plugins
     scripts.init(client: discord.Client)
 """
-__version__ = "0.2"
+__version__ = "0.2.2"
 
 
 def init(client: "discord.Client"):
@@ -42,6 +42,7 @@ def init(client: "discord.Client"):
         if not d.startswith("_")
         and os.path.isfile(os.path.join(scripts_path, d, "manifest.json"))
     }
+
     scripts.pop("belcord", None)
     last = []
 
@@ -52,12 +53,8 @@ def init(client: "discord.Client"):
             "r", encoding="utf-8"
         ) as f:
             manifest = json.load(f)
-            if manifest.get("enabled", False):
-                if (load_layer := manifest.get("load_layer", -1)) < 0:
-                    last.append(s)
-                    del scripts[s]
-                else:
-                    scripts[s] = load_layer
+            if manifest.get("enabled", True):
+                scripts[s] = manifest.get("load_layer", -1)
             else:
                 del scripts[s]
 
@@ -66,6 +63,7 @@ def init(client: "discord.Client"):
         i[0] for i in
         sorted(scripts.items(), key=lambda x: x[1])
     ] + last
+    print(scripts)
 
     # Load selected scripts
     for s in scripts:
