@@ -1,5 +1,5 @@
 """Plugin manager CLI."""
-__version__ = "1.2.2"
+__version__ = "1.3"
 
 import aiohttp
 import asyncio
@@ -121,6 +121,10 @@ def get_plugin_status(plugin_name: str) -> str | None:
 
 def update_manifest_enabled(plugin_name: str, enabled: bool) -> bool:
     """Updates the 'enabled' key in local manifest.json."""
+    if plugin_name.endswith(".py"):
+        print(f"Single-file plugin '{plugin_name}' cannot be toggled.")
+        return False
+
     if plugin_name.lower() == "belcord":
         print("Plugin 'belcord' is always enabled and cannot be toggled.")
         return False
@@ -236,6 +240,15 @@ async def install_plugin_with_dependencies(session: aiohttp.ClientSession, plugi
         return True  # Avoid circular loops
     visited.add(plugin_name)
 
+    # If the dependency is a single-file plugin package, download directly
+    if plugin_name.endswith(".py"):
+        remote_url = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{PLUGINS_PATH}/{plugin_name}"
+        local_path = os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, plugin_name)
+        print(f"Installing single-file package '{plugin_name}'...")
+        await download_file(session, remote_url, local_path)
+        return True
+
+    # Standard plugin handling with recursive dependency resolution
     manifest = await load_manifest(session, plugin_name)
     if not manifest:
         print(f"Cannot install '{plugin_name}': manifest not found or invalid.")
@@ -244,8 +257,15 @@ async def install_plugin_with_dependencies(session: aiohttp.ClientSession, plugi
     dependencies = manifest.get("dependencies", [])
     if isinstance(dependencies, list):
         for dep_name in dependencies:
-            if not get_plugin_status(dep_name):
+            is_py = dep_name.endswith(".py")
+            is_installed = (
+                os.path.exists(os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, dep_name))
+                if is_py else get_plugin_status(dep_name)
+            )
+
+            if not is_installed:
                 print(f"Found dependency '{dep_name}' for '{plugin_name}'. Installing dependency first...")
+                # Recursive call handles dependencies of dependencies
                 success = await install_plugin_with_dependencies(session, dep_name, visited)
                 if not success:
                     print(f"Failed to install dependency '{dep_name}'. Aborting installation of '{plugin_name}'.")
@@ -396,6 +416,17 @@ async def cmd_uninstall(session: aiohttp.ClientSession, args: list[str]):
         return
 
     for name in args:
+        # Check if target is a single-file plugin
+        file_path = os.path.join(LOCAL_PLUGINS_DIR, PLUGINS_PATH, name if name.endswith(".py") else f"{name}.py")
+        if os.path.isfile(file_path):
+            try:
+                os.remove(file_path)
+                print(f"Uninstalled plugin file: {name}")
+                continue
+            except Exception as e:
+                print(f"Failed to uninstall plugin file '{name}': {e}")
+                continue
+
         path = get_plugin_path(name)
         if path and os.path.exists(path):
             try:
