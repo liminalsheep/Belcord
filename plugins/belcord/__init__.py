@@ -4,7 +4,7 @@ Added Events:
     on_startup: Triggered once when the client becomes ready.
     on_closing: Triggered when `await client.close()` is called.
 """
-__version__ = "0.2.1"
+__version__ = "0.3"
 __all__ = ["trigger_event", "create_event", "remove_event"]
 
 def wlc() -> None:
